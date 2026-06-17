@@ -1,41 +1,15 @@
-name: 진에어 취소표 모니터링
+# GitHub Actions는 Cloudflare에 의해 차단되어 사용하지 않습니다.
+# 모니터링은 Mac 로컬 launchd에서 실행됩니다.
+# 참고: setup_local.sh 실행으로 Mac에 설치됩니다.
+
+name: 진에어 취소표 모니터링 (비활성)
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # 5분마다 실행
-  workflow_dispatch:          # GitHub 웹에서 수동 실행 가능
+  workflow_dispatch:  # 수동 실행만 허용 (자동 스케줄 없음)
 
 jobs:
-  monitor:
+  notice:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
-
     steps:
-      - name: 코드 체크아웃
-        uses: actions/checkout@v4
-
-      - name: Python 3.11 설정
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: 패키지 설치
-        run: |
-          pip install -r requirements.txt
-          playwright install chromium --with-deps
-
-      - name: 모니터링 실행
-        env:
-          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
-          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
-          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-        run: python check_jinair.py
-
-      - name: 디버그 스크린샷 업로드
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots-${{ github.run_number }}
-          path: screenshots/
-          retention-days: 1
+      - name: 안내
+        run: echo "이 모니터링은 Mac 로컬(launchd)에서 실행됩니다. jinair.com이 Cloudflare로 보호되어 GitHub Actions IP가 차단됩니다."

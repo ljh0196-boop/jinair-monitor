@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""진에어 취소표 모니터링 — GMP↔HIN"""
+"""진에어 취소표 모니터링 — KAYAK 경유, Mac 로컬 실행"""
 
 import asyncio
 import os
 import smtplib
+import json
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
@@ -32,6 +33,16 @@ SENDER_EMAIL = os.environ["SENDER_EMAIL"]
 SENDER_PASSWORD = os.environ["SENDER_PASSWORD"]
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL", "ljh0196@naver.com")
 
+LOG_FILE = os.path.join(os.path.dirname(__file__), "monitor.log")
+
+
+def log(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
 
 def get_smtp(email: str) -> tuple[str, int]:
     domain = email.split("@")[-1].lower()
@@ -47,13 +58,18 @@ def send_email(flight: dict, seats: list) -> None:
     )
     items_html = "".join(f"<li>{s}</li>" for s in seats)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    kayak_url = (
+        f"https://www.kayak.co.kr/flights/"
+        f"{flight['departure']}-{flight['arrival']}/{flight['date']}/1adults"
+        f"?airlines=LJ&sort=price_a"
+    )
     body = f"""
 <html><body style="font-family:sans-serif;max-width:600px;margin:0 auto">
 <div style="background:#1a56db;color:white;padding:20px;border-radius:8px 8px 0 0">
   <h2 style="margin:0">✈️ 진에어 취소표 알림</h2>
 </div>
 <div style="border:1px solid #ddd;border-top:none;padding:20px;border-radius:0 0 8px 8px">
-  <p>아래 항공편에 <strong>좌석이 생겼습니다!</strong> 빠르게 예매하세요.</p>
+  <p>아래 항공편에 <strong>진에어 좌석이 생겼습니다!</strong> 빠르게 예매하세요.</p>
   <table style="width:100%;border-collapse:collapse;margin:16px 0">
     <tr style="background:#f3f4f6">
       <td style="padding:10px;font-weight:bold;width:30%">노선</td>
@@ -68,17 +84,22 @@ def send_email(flight: dict, seats: list) -> None:
       <td style="padding:10px">{now}</td>
     </tr>
   </table>
-  <p><strong>가용 좌석 정보:</strong></p>
+  <p><strong>확인된 항공편:</strong></p>
   <ul>{items_html}</ul>
   <div style="text-align:center;margin:24px 0">
     <a href="https://www.jinair.com/booking/index"
        style="background:#1a56db;color:white;padding:14px 32px;text-decoration:none;
+              border-radius:6px;font-size:16px;font-weight:bold;margin-right:8px">
+      진에어 바로 예매 →
+    </a>
+    <a href="{kayak_url}"
+       style="background:#ff690f;color:white;padding:14px 32px;text-decoration:none;
               border-radius:6px;font-size:16px;font-weight:bold">
-      지금 바로 예매하기 →
+      KAYAK에서 확인
     </a>
   </div>
   <p style="color:#9ca3af;font-size:12px;border-top:1px solid #e5e7eb;padding-top:12px">
-    진에어 취소표 모니터링 시스템(GitHub Actions) 자동 발송
+    진에어 취소표 모니터링 자동 발송 | 데이터 출처: KAYAK
   </p>
 </div>
 </body></html>"""
@@ -95,204 +116,81 @@ def send_email(flight: dict, seats: list) -> None:
         server.starttls()
         server.login(SENDER_EMAIL, SENDER_PASSWORD)
         server.sendmail(SENDER_EMAIL, RECIPIENT_EMAIL, msg.as_string())
-    print(f"  ✅ 이메일 발송 → {RECIPIENT_EMAIL}")
-
-
-async def try_click(page, selectors: list, timeout: int = 3000) -> bool:
-    for sel in selectors:
-        try:
-            await page.click(sel, timeout=timeout)
-            return True
-        except Exception:
-            continue
-    return False
-
-
-async def try_fill(page, selectors: list, value: str, timeout: int = 3000) -> bool:
-    for sel in selectors:
-        try:
-            await page.click(sel, timeout=timeout)
-            await page.fill(sel, value, timeout=timeout)
-            return True
-        except Exception:
-            continue
-    return False
+    log(f"  ✅ 이메일 발송 → {RECIPIENT_EMAIL}")
 
 
 async def check_flight(page, flight: dict) -> list:
-    print(f"\n{'─'*52}")
-    print(f"🔍 {flight['departure_name']}({flight['departure']}) → "
-          f"{flight['arrival_name']}({flight['arrival']}) | {flight['date']}")
+    """KAYAK에서 진에어 직항 좌석 확인. 가용 항공편 정보 리스트 반환."""
+    dep, arr, date = flight["departure"], flight["arrival"], flight["date"]
+    url = (
+        f"https://www.kayak.co.kr/flights/{dep}-{arr}/{date}/1adults"
+        f"?airlines=LJ&stops=0&sort=price_a"
+    )
+    log(f"  🔍 {flight['departure_name']}({dep}) → {flight['arrival_name']}({arr}) | {date}")
 
-    api_responses: list[dict] = []
-
-    async def on_response(response):
-        if any(k in response.url for k in ["avail", "flight", "schedule", "fare", "lowfare"]):
-            try:
-                api_responses.append({"url": response.url, "data": await response.json()})
-            except Exception:
-                pass
-
-    page.on("response", on_response)
-
-    # ── 1) 페이지 로드 ────────────────────────────────
     try:
-        await page.goto(
-            "https://www.jinair.com/booking/index?snsLang=ko_KR&ctrCd=KOR",
-            wait_until="networkidle",
-            timeout=30000,
-        )
+        await page.goto(url, wait_until="load", timeout=30000)
     except PlaywrightTimeout:
-        print("  ⚠️  로드 타임아웃, 계속 진행")
-    await page.wait_for_timeout(2000)
+        log("  ⚠️  페이지 로드 타임아웃")
 
-    # ── 2) 편도 선택 ──────────────────────────────────
-    await try_click(page, [
-        "text=편도", 'input[value="OW"]',
-        'label:has-text("편도")', '[data-value="OW"]',
-    ])
-    await page.wait_for_timeout(500)
-
-    # ── 3) 출발지 입력 ────────────────────────────────
-    dep = flight["departure"]
-    for sel in [
-        "#dep_airport", "#departureAirport", 'input[name="depAirport"]',
-        'input[placeholder*="출발"]', '[aria-label*="출발"]',
-        ".departure input", '[class*="departure"] input',
-    ]:
-        try:
-            await page.click(sel, timeout=2000)
-            await page.fill(sel, dep, timeout=2000)
-            await page.wait_for_timeout(800)
-            for ac in [f"text={dep}", f'[data-code="{dep}"]', f'li:has-text("{dep}")']:
-                try:
-                    await page.click(ac, timeout=2000)
-                    print(f"  ✓ 출발지: {dep}")
-                    break
-                except Exception:
-                    continue
-            break
-        except Exception:
-            continue
-    await page.wait_for_timeout(500)
-
-    # ── 4) 도착지 입력 ────────────────────────────────
-    arr = flight["arrival"]
-    for sel in [
-        "#arr_airport", "#arrivalAirport", 'input[name="arrAirport"]',
-        'input[placeholder*="도착"]', '[aria-label*="도착"]',
-        ".arrival input", '[class*="arrival"] input',
-    ]:
-        try:
-            await page.click(sel, timeout=2000)
-            await page.fill(sel, arr, timeout=2000)
-            await page.wait_for_timeout(800)
-            for ac in [f"text={arr}", f'[data-code="{arr}"]', f'li:has-text("{arr}")']:
-                try:
-                    await page.click(ac, timeout=2000)
-                    print(f"  ✓ 도착지: {arr}")
-                    break
-                except Exception:
-                    continue
-            break
-        except Exception:
-            continue
-    await page.wait_for_timeout(500)
-
-    # ── 5) 날짜 선택 ──────────────────────────────────
-    date_str = flight["date"]
-    day_only = str(int(date_str.split("-")[2]))
-    await try_fill(page, [
-        "#dep_date", "#departureDate", 'input[name="depDate"]',
-        'input[type="date"]', '[aria-label*="출발일"]', ".departure-date input",
-    ], date_str)
+    # 항공권 결과 로딩 대기
     try:
-        await page.click(f'button:has-text("{day_only}")', timeout=2000)
-    except Exception:
-        pass
-    await page.wait_for_timeout(500)
-
-    # ── 6) 검색 실행 ──────────────────────────────────
-    clicked = await try_click(page, [
-        'button:has-text("항공권 검색")', 'button:has-text("검색")',
-        'button:has-text("조회")', "#btnSearch", ".btn-search",
-        'button[type="submit"]', 'input[type="submit"]',
-    ], timeout=4000)
-    if clicked:
-        print("  ✓ 검색 실행")
-
-    try:
-        await page.wait_for_load_state("networkidle", timeout=30000)
+        await page.wait_for_selector("[class*='nrc6'], [class*='resultWrapper'], [class*='flight']",
+                                     timeout=15000)
     except PlaywrightTimeout:
         pass
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(5000)
 
-    # ── 7) 스크린샷 (디버깅) ──────────────────────────
-    os.makedirs("screenshots", exist_ok=True)
-    shot = f"screenshots/{flight['id']}_{datetime.now().strftime('%H%M%S')}.png"
-    await page.screenshot(path=shot, full_page=True)
-    print(f"  📸 {shot}")
+    body_text = await page.inner_text("body")
 
-    # ── 8) 가용 좌석 파싱 ─────────────────────────────
-    available: list[str] = []
+    # ── 진에어 항공편 찾기 ────────────────────────────
+    available = []
 
-    # API 응답 우선 파싱 (Navitaire 스타일)
-    for resp in api_responses:
-        data = resp["data"]
-        if not isinstance(data, dict):
-            continue
-        root = data.get("data", data)
-        for jk in ["journeys", "Journeys", "flights", "Flights"]:
-            for journey in root.get(jk, []):
-                for sk in ["segments", "Segments"]:
-                    for seg in journey.get(sk, []):
-                        for fk in ["fares", "Fares"]:
-                            for fare in seg.get(fk, []):
-                                count = int(
-                                    fare.get("availableSeats")
-                                    or fare.get("AvailabilityCount")
-                                    or 0
-                                )
-                                if count > 0:
-                                    cls = fare.get("class") or fare.get("ClassOfService") or ""
-                                    price = fare.get("price") or fare.get("FareAmount") or ""
-                                    available.append(f"클래스: {cls} | 잔여 {count}석 | {price}원")
+    # 페이지에 진에어 언급 여부
+    has_jinair = "진에어" in body_text
+    has_price = any(kw in body_text for kw in ["원", "KRW"])
+    sold_out = any(kw in body_text for kw in ["예약 불가", "매진", "결과 없음", "항공편 없음", "검색 결과가 없습니다"])
 
-    # 페이지 텍스트 fallback
-    if not available:
-        body_text = await page.inner_text("body")
-        sold_out = any(kw in body_text for kw in ["매진", "SOLD OUT", "좌석없음", "잔여좌석 0"])
-        has_select = any(kw in body_text for kw in ["선택", "원"])
+    if sold_out or not has_jinair:
+        log("  ❌ 진에어 좌석 없음")
+        return []
 
-        if not sold_out and has_select:
-            price_lines = [
-                ln.strip() for ln in body_text.split("\n")
-                if "원" in ln and any(c.isdigit() for c in ln)
-            ]
-            if price_lines:
-                available.extend(price_lines[:5])
-            else:
-                available.append("좌석 있음 — 스크린샷 확인 후 직접 예매하세요")
-        elif sold_out:
-            print("  ❌ 매진 확인")
-        else:
-            print("  ⚠️  판단 불가 — 스크린샷을 확인하세요")
+    if has_jinair and has_price:
+        # 가격 라인 파싱
+        lines = [l.strip() for l in body_text.split("\n") if l.strip()]
+        jinair_idx = [i for i, l in enumerate(lines) if "진에어" in l]
 
-    page.remove_listener("response", on_response)
+        for idx in jinair_idx:
+            # 진에어 주변 라인에서 시간/가격 추출
+            context_lines = lines[max(0, idx-5):idx+8]
+            time_info = ""
+            price_info = ""
+            for l in context_lines:
+                if "–" in l and (":" in l or "시" in l):
+                    time_info = l
+                if "원" in l and any(c.isdigit() for c in l):
+                    price_info = l
+            if time_info or price_info:
+                info = f"진에어 직항 {time_info} {price_info}".strip()
+                if info not in available:
+                    available.append(info)
+
+        if not available:
+            available.append("진에어 직항 좌석 확인됨 — 가격 직접 확인 필요")
+
     return available
 
 
 async def main() -> None:
-    print(f"\n{'═'*52}")
-    print(f"🚀 진에어 모니터링 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"{'═'*52}")
+    log(f"\n{'═'*52}")
+    log(f"🚀 진에어 모니터링 시작")
 
     found: list[tuple] = []
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
         )
         ctx = await browser.new_context(
             user_agent=(
@@ -302,17 +200,23 @@ async def main() -> None:
             viewport={"width": 1280, "height": 900},
             locale="ko-KR",
         )
+        # webdriver 플래그 숨기기 (KAYAK 봇 탐지 완화)
+        await ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
         page = await ctx.new_page()
 
         for flight in FLIGHTS:
             try:
                 seats = await check_flight(page, flight)
                 if seats:
-                    print(f"  🎉 좌석 발견!")
+                    log(f"  🎉 좌석 발견: {seats}")
                     found.append((flight, seats))
+                else:
+                    log("  — 매진 상태 유지")
             except Exception as exc:
-                print(f"  ❌ 오류: {exc}")
-            await page.wait_for_timeout(2000)
+                log(f"  ❌ 오류: {exc}")
+            await page.wait_for_timeout(3000)
 
         await ctx.close()
         await browser.close()
@@ -321,11 +225,11 @@ async def main() -> None:
         try:
             send_email(flight, seats)
         except Exception as exc:
-            print(f"  ❌ 이메일 실패: {exc}")
+            log(f"  ❌ 이메일 실패: {exc}")
 
     if not found:
-        print("\nℹ️  모든 노선 매진 — 알림 없음")
-    print(f"\n✅ 완료 | {datetime.now().strftime('%H:%M:%S')}")
+        log("ℹ️  가용 좌석 없음 — 알림 없음")
+    log("✅ 완료")
 
 
 if __name__ == "__main__":
