@@ -1,0 +1,41 @@
+name: 진에어 취소표 모니터링
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # 5분마다 실행
+  workflow_dispatch:          # GitHub 웹에서 수동 실행 가능
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: 패키지 설치
+        run: |
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: 모니터링 실행
+        env:
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python check_jinair.py
+
+      - name: 디버그 스크린샷 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 1
